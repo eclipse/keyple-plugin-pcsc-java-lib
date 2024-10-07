@@ -11,14 +11,13 @@
  ************************************************************************************** */
 package org.eclipse.keyple.plugin.pcsc;
 
-import java.security.Security;
+import de.intarsys.security.smartcard.pcsc.IPCSCCardReader;
+import de.intarsys.security.smartcard.pcsc.IPCSCContext;
+import de.intarsys.security.smartcard.pcsc.PCSCContextFactory;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.regex.Pattern;
 import javax.smartcardio.CardTerminal;
-import javax.smartcardio.CardTerminals;
-import javax.smartcardio.TerminalFactory;
-import jnasmartcardio.Smartcardio;
 import org.eclipse.keyple.core.plugin.PluginIOException;
 import org.eclipse.keyple.core.plugin.spi.ObservablePluginSpi;
 import org.eclipse.keyple.core.plugin.spi.reader.ReaderSpi;
@@ -34,6 +33,7 @@ import org.slf4j.LoggerFactory;
 final class PcscPluginAdapter implements PcscPlugin, ObservablePluginSpi {
 
   private static final Logger logger = LoggerFactory.getLogger(PcscPluginAdapter.class);
+  private IPCSCContext context;
 
   /**
    * Singleton instance of the class
@@ -83,23 +83,17 @@ final class PcscPluginAdapter implements PcscPlugin, ObservablePluginSpi {
         PcscSupportedContactProtocol.ISO_7816_3_T1.getDefaultRule());
   }
 
-  private CardTerminals terminals;
-  private boolean createCardTerminals = false; // first created in constructor
-
   private Pattern contactlessReaderIdentificationFilterPattern;
   private int cardMonitoringCycleDuration;
+  private boolean isContextInitialized;
 
   /** Constructor. */
-  PcscPluginAdapter() {
-    // Use jnasmartcardio as smart card service provider
-    Security.insertProviderAt(new Smartcardio(), 1);
-    terminals = TerminalFactory.getDefault().terminals();
-  }
+  PcscPluginAdapter() {}
 
   /**
-   * Gets the single instance of PcscPluginWinAdapter.
+   * Gets the single instance.
    *
-   * @return single instance of PcscPluginWinAdapter
+   * @return This instance.
    * @since 2.0.0
    */
   static PcscPluginAdapter getInstance() {
@@ -118,12 +112,12 @@ final class PcscPluginAdapter implements PcscPlugin, ObservablePluginSpi {
    *
    * <p>Note: this method is platform dependent.
    *
-   * @param terminal A smartcard.io {@link CardTerminal}.
+   * @param pcscCardReader A smartcard.io {@link CardTerminal}.
    * @return A not null reference.
    * @since 2.0.0
    */
-  PcscReaderAdapter createReader(CardTerminal terminal) {
-    return new PcscReaderAdapter(terminal, this, cardMonitoringCycleDuration);
+  PcscReaderAdapter createReader(IPCSCCardReader pcscCardReader) {
+    return new PcscReaderAdapter(pcscCardReader, this, cardMonitoringCycleDuration);
   }
 
   /**
@@ -147,8 +141,9 @@ final class PcscPluginAdapter implements PcscPlugin, ObservablePluginSpi {
     if (logger.isTraceEnabled()) {
       logger.trace("Plugin [{}]: search available reader", getName());
     }
-    for (CardTerminal terminal : getCardTerminalList()) {
-      readerNames.add(terminal.getName());
+
+    for (IPCSCCardReader reader : getPcscCardReaderList()) {
+      readerNames.add(reader.getName());
     }
     if (logger.isTraceEnabled()) {
       logger.trace("Plugin [{}]: readers found: {}", getName(), JsonUtil.toJson(readerNames));
@@ -175,8 +170,9 @@ final class PcscPluginAdapter implements PcscPlugin, ObservablePluginSpi {
   public Set<ReaderSpi> searchAvailableReaders() throws PluginIOException {
     Set<ReaderSpi> readerSpis = new HashSet<>();
     logger.info("Plugin [{}]: search available readers", getName());
-    for (CardTerminal terminal : getCardTerminalList()) {
-      readerSpis.add(createReader(terminal));
+
+    for (IPCSCCardReader reader : getPcscCardReaderList()) {
+      readerSpis.add(createReader(reader));
     }
     for (ReaderSpi readerSpi : readerSpis) {
       logger.info("Plugin [{}]: reader found: [{}]", getName(), readerSpi.getName());
@@ -202,15 +198,14 @@ final class PcscPluginAdapter implements PcscPlugin, ObservablePluginSpi {
    * @return An empty list if no reader is available.
    * @throws PluginIOException If an error occurs while accessing the list.
    */
-  private List<CardTerminal> getCardTerminalList() throws PluginIOException {
-
+  private List<IPCSCCardReader> getPcscCardReaderList() throws PluginIOException {
     // parse the current readers list to create the ReaderSpi(s) associated with new reader(s)
     try {
-      if (createCardTerminals) {
-        terminals = TerminalFactory.getDefault().terminals();
-        createCardTerminals = false;
+      if (!isContextInitialized) {
+        context = PCSCContextFactory.get().establishContext();
+        isContextInitialized = true;
       }
-      return terminals.list();
+      return context.listReaders();
     } catch (Exception e) {
       if (e.getMessage().contains("SCARD_E_NO_READERS_AVAILABLE")) {
         logger.error("Plugin [{}]: no reader available", getName());
@@ -218,7 +213,7 @@ final class PcscPluginAdapter implements PcscPlugin, ObservablePluginSpi {
           || e.getMessage().contains("SCARD_E_SERVICE_STOPPED")) {
         logger.error("Plugin [{}]: no smart card service error", getName());
         // the CardTerminals object is no more valid
-        createCardTerminals = true;
+        isContextInitialized = false;
       } else if (e.getMessage().contains("SCARD_F_COMM_ERROR")) {
         logger.error("Plugin [{}]: reader communication error", getName());
       } else {
@@ -238,12 +233,12 @@ final class PcscPluginAdapter implements PcscPlugin, ObservablePluginSpi {
     if (logger.isTraceEnabled()) {
       logger.trace("Plugin [{}]: search reader [{}]", getName(), readerName);
     }
-    for (CardTerminal terminal : getCardTerminalList()) {
-      if (readerName.equals(terminal.getName())) {
+    for (IPCSCCardReader reader : getPcscCardReaderList()) {
+      if (readerName.equals(reader.getName())) {
         if (logger.isTraceEnabled()) {
           logger.trace("Plugin [{}]: reader found", getName());
         }
-        return createReader(terminal);
+        return createReader(reader);
       }
     }
     if (logger.isTraceEnabled()) {

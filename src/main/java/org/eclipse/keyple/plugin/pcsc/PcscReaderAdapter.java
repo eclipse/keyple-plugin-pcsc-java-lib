@@ -11,17 +11,15 @@
  ************************************************************************************** */
 package org.eclipse.keyple.plugin.pcsc;
 
+import de.intarsys.security.smartcard.pcsc.*;
+import de.intarsys.security.smartcard.pcsc.nativec._IPCSC;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.regex.Pattern;
-import javax.smartcardio.*;
-import org.eclipse.keyple.core.plugin.CardIOException;
-import org.eclipse.keyple.core.plugin.ReaderIOException;
-import org.eclipse.keyple.core.plugin.TaskCanceledException;
+import org.eclipse.keyple.core.plugin.*;
 import org.eclipse.keyple.core.plugin.spi.reader.ConfigurableReaderSpi;
 import org.eclipse.keyple.core.plugin.spi.reader.observable.ObservableReaderSpi;
-import org.eclipse.keyple.core.plugin.spi.reader.observable.state.insertion.CardInsertionWaiterBlockingSpi;
-import org.eclipse.keyple.core.plugin.spi.reader.observable.state.processing.CardPresenceMonitorBlockingSpi;
-import org.eclipse.keyple.core.plugin.spi.reader.observable.state.removal.CardRemovalWaiterBlockingSpi;
+import org.eclipse.keyple.core.plugin.spi.reader.observable.state.insertion.CardInsertionWaiterAsynchronousSpi;
+import org.eclipse.keyple.core.plugin.spi.reader.observable.state.removal.CardRemovalWaiterAsynchronousSpi;
 import org.eclipse.keyple.core.util.Assert;
 import org.eclipse.keyple.core.util.HexUtil;
 import org.slf4j.Logger;
@@ -34,28 +32,32 @@ import org.slf4j.LoggerFactory;
  */
 final class PcscReaderAdapter
     implements PcscReader,
+        PCSCStatusMonitor.IStatusListener,
         ConfigurableReaderSpi,
         ObservableReaderSpi,
-        CardInsertionWaiterBlockingSpi,
-        CardPresenceMonitorBlockingSpi,
-        CardRemovalWaiterBlockingSpi {
+        CardInsertionWaiterAsynchronousSpi,
+        CardRemovalWaiterAsynchronousSpi {
 
   private static final Logger logger = LoggerFactory.getLogger(PcscReaderAdapter.class);
 
-  private final CardTerminal terminal;
+  private final IPCSCCardReader pcscCardReader;
+  private IPCSCContext connectionContext;
+  private IPCSCConnection connection;
+  private PCSCStatusMonitor monitor;
   private final String name;
   private final PcscPluginAdapter pluginAdapter;
   private final boolean isWindows;
   private final int cardMonitoringCycleDuration;
-  private Card card;
-  private CardChannel channel;
   private Boolean isContactless;
   private String protocol = IsoProtocol.ANY.getValue();
   private boolean isModeExclusive = true;
   private DisconnectionMode disconnectionMode = DisconnectionMode.RESET;
-  private final AtomicBoolean loopWaitCard = new AtomicBoolean();
 
   private final AtomicBoolean loopWaitCardRemoval = new AtomicBoolean();
+  private CardInsertionWaiterAsynchronousApi cardInsertionCallback;
+  private CardRemovalWaiterAsynchronousApi cardRemoveCallback;
+  private boolean isMonitoringActive;
+  private String atr = "";
 
   /**
    * Constructor.
@@ -63,65 +65,15 @@ final class PcscReaderAdapter
    * @since 2.0.0
    */
   PcscReaderAdapter(
-      CardTerminal terminal, PcscPluginAdapter pluginAdapter, int cardMonitoringCycleDuration) {
-    this.terminal = terminal;
+      IPCSCCardReader pcscCardReader,
+      PcscPluginAdapter pluginAdapter,
+      int cardMonitoringCycleDuration) {
+    this.pcscCardReader = pcscCardReader;
     this.pluginAdapter = pluginAdapter;
-    this.name = terminal.getName();
+    this.name = pcscCardReader.getName();
     this.isWindows = System.getProperty("os.name").toLowerCase().contains("win");
     this.cardMonitoringCycleDuration = cardMonitoringCycleDuration;
-  }
-
-  /**
-   * {@inheritDoc}
-   *
-   * @since 2.0.0
-   */
-  @Override
-  public void waitForCardInsertion() throws TaskCanceledException, ReaderIOException {
-
-    if (logger.isTraceEnabled()) {
-      logger.trace(
-          "Reader [{}]: start waiting card insertion (loop latency: {} ms)",
-          getName(),
-          cardMonitoringCycleDuration);
-    }
-
-    // activate loop
-    loopWaitCard.set(true);
-
-    try {
-      while (loopWaitCard.get()) {
-        if (terminal.waitForCardPresent(cardMonitoringCycleDuration)) {
-          // card inserted
-          if (logger.isTraceEnabled()) {
-            logger.trace("Reader [{}]: card inserted", getName());
-          }
-          return;
-        }
-        if (Thread.interrupted()) {
-          break;
-        }
-      }
-      if (logger.isTraceEnabled()) {
-        logger.trace("Reader [{}]: waiting card insertion stopped", getName());
-      }
-    } catch (CardException e) {
-      // here, it is a communication failure with the reader
-      throw new ReaderIOException(
-          name + ": an error occurred while waiting for a card insertion", e);
-    }
-    throw new TaskCanceledException(
-        name + ": the wait for a card insertion task has been cancelled");
-  }
-
-  /**
-   * {@inheritDoc}
-   *
-   * @since 2.0.0
-   */
-  @Override
-  public void stopWaitForCardInsertion() {
-    loopWaitCard.set(false);
+    monitor = new PCSCStatusMonitor(pcscCardReader);
   }
 
   /**
@@ -170,7 +122,6 @@ final class PcscReaderAdapter
     String protocolRule = pluginAdapter.getProtocolRule(readerProtocol);
     boolean isCurrentProtocol;
     if (protocolRule != null && !protocolRule.isEmpty()) {
-      String atr = HexUtil.toHex(card.getATR().getBytes());
       isCurrentProtocol = Pattern.compile(protocolRule).matcher(atr).matches();
     } else {
       isCurrentProtocol = false;
@@ -185,7 +136,8 @@ final class PcscReaderAdapter
    */
   @Override
   public void onStartDetection() {
-    /* Nothing to do here in this reader */
+    isMonitoringActive = true;
+    monitor.addStatusListener(this);
   }
 
   /**
@@ -195,7 +147,8 @@ final class PcscReaderAdapter
    */
   @Override
   public void onStopDetection() {
-    /* Nothing to do here in this reader */
+    isMonitoringActive = false;
+    monitor.removeStatusListener(this);
   }
 
   /**
@@ -217,25 +170,32 @@ final class PcscReaderAdapter
   public void openPhysicalChannel() throws ReaderIOException {
     /* init of the card physical channel: if not yet established, opening of a new physical channel */
     try {
-      if (card == null) {
+      if (connection == null) {
         if (logger.isDebugEnabled()) {
           logger.debug(
               "Reader [{}]: open card physical channel for protocol [{}]", getName(), protocol);
         }
-        this.card = this.terminal.connect(protocol);
-        if (isModeExclusive) {
-          card.beginExclusive();
-          if (logger.isDebugEnabled()) {
-            logger.debug("Reader [{}]: open card physical channel in exclusive mode", getName());
-          }
-        } else {
-          if (logger.isDebugEnabled()) {
-            logger.debug("Reader [{}]: open card physical channel in shared mode", getName());
-          }
-        }
+        connectionContext = pcscCardReader.getContext().establishContext();
+        connection =
+            connectionContext.connect(
+                "example",
+                pcscCardReader.getName(),
+                _IPCSC.SCARD_SHARE_SHARED,
+                _IPCSC.SCARD_PROTOCOL_Tx);
+        //        if (isModeExclusive) {
+        //          connection.beginTransaction();
+        //          if (logger.isDebugEnabled()) {
+        //            logger.debug("Reader [{}]: open card physical channel in exclusive mode",
+        // getName());
+        //          }
+        //        } else {
+        //          if (logger.isDebugEnabled()) {
+        //            logger.debug("Reader [{}]: open card physical channel in shared mode",
+        // getName());
+        //          }
+        //        }
       }
-      this.channel = card.getBasicChannel();
-    } catch (CardException e) {
+    } catch (PCSCException e) {
       throw new ReaderIOException(getName() + ": Error while opening Physical Channel", e);
     }
   }
@@ -248,18 +208,20 @@ final class PcscReaderAdapter
   @Override
   public void closePhysicalChannel() throws ReaderIOException {
     try {
-      if (card != null) {
-        channel = null;
-        card.disconnect(disconnectionMode == DisconnectionMode.RESET);
-        card = null;
+      if (connection != null) {
+        connection.disconnect(_IPCSC.SCARD_LEAVE_CARD);
+        connectionContext.dispose();
       } else {
         if (logger.isDebugEnabled()) {
           logger.debug(
               "Reader [{}]: card object found null when closing physical channel", getName());
         }
       }
-    } catch (CardException e) {
+    } catch (PCSCException e) {
       throw new ReaderIOException("Error while closing physical channel", e);
+    } finally {
+      connection = null;
+      connectionContext = null;
     }
   }
 
@@ -270,7 +232,7 @@ final class PcscReaderAdapter
    */
   @Override
   public boolean isPhysicalChannelOpen() {
-    return card != null;
+    return connection != null;
   }
 
   /**
@@ -281,8 +243,8 @@ final class PcscReaderAdapter
   @Override
   public boolean checkCardPresence() throws ReaderIOException {
     try {
-      return terminal.isCardPresent();
-    } catch (CardException e) {
+      return pcscCardReader.getState().isPresent();
+    } catch (PCSCException e) {
       throw new ReaderIOException("Exception occurred in isCardPresent", e);
     }
   }
@@ -294,7 +256,7 @@ final class PcscReaderAdapter
    */
   @Override
   public String getPowerOnData() {
-    return HexUtil.toHex(card.getATR().getBytes());
+    return atr;
   }
 
   /**
@@ -305,22 +267,15 @@ final class PcscReaderAdapter
   @Override
   public byte[] transmitApdu(byte[] apduCommandData) throws ReaderIOException, CardIOException {
     byte[] apduResponseData;
-    if (channel != null) {
+    if (connection != null) {
       try {
-        apduResponseData = channel.transmit(new CommandAPDU(apduCommandData)).getBytes();
-      } catch (CardNotPresentException e) {
-        throw new CardIOException(name + ": " + e.getMessage(), e);
-      } catch (CardException e) {
-        if (e.getMessage().contains("CARD")
-            || e.getMessage().contains("NOT_TRANSACTED")
-            || e.getMessage().contains("INVALID_ATR")) {
-          throw new CardIOException(name + ": " + e.getMessage(), e);
-        } else {
-          throw new ReaderIOException(name + ": " + e.getMessage(), e);
-        }
+        apduResponseData =
+            connection.transmit(apduCommandData, 0, apduCommandData.length, 512, true);
       } catch (IllegalStateException | IllegalArgumentException e) {
         // card could have been removed prematurely
         throw new CardIOException(name + ": " + e.getMessage(), e);
+      } catch (PCSCException e) {
+        throw new RuntimeException(e);
       }
     } else {
       // could occur if the card was removed
@@ -357,80 +312,6 @@ final class PcscReaderAdapter
   /**
    * {@inheritDoc}
    *
-   * @since 2.0.0
-   */
-  @Override
-  public void monitorCardPresenceDuringProcessing()
-      throws ReaderIOException, TaskCanceledException {
-    waitForCardRemoval();
-  }
-
-  /**
-   * {@inheritDoc}
-   *
-   * @since 2.0.0
-   */
-  @Override
-  public void stopCardPresenceMonitoringDuringProcessing() {
-    stopWaitForCardRemoval();
-  }
-
-  /**
-   * {@inheritDoc}
-   *
-   * @since 2.0.0
-   */
-  @Override
-  public void waitForCardRemoval() throws ReaderIOException, TaskCanceledException {
-
-    if (logger.isTraceEnabled()) {
-      logger.trace(
-          "Reader [{}]: start waiting card removal (loop latency: {} ms)",
-          name,
-          cardMonitoringCycleDuration);
-    }
-
-    // activate loop
-    loopWaitCardRemoval.set(true);
-
-    try {
-      while (loopWaitCardRemoval.get()) {
-        if (terminal.waitForCardAbsent(cardMonitoringCycleDuration)) {
-          // card removed
-          if (logger.isTraceEnabled()) {
-            logger.trace("Reader [{}]: card removed", name);
-          }
-          return;
-        }
-        if (Thread.interrupted()) {
-          break;
-        }
-      }
-      if (logger.isTraceEnabled()) {
-        logger.trace("Reader [{}]: waiting card removal stopped", name);
-      }
-    } catch (CardException e) {
-      // here, it is a communication failure with the reader
-      throw new ReaderIOException(
-          name + ": an error occurred while waiting for the card removal.", e);
-    }
-    throw new TaskCanceledException(
-        name + ": the wait for the card removal task has been cancelled.");
-  }
-
-  /**
-   * {@inheritDoc}
-   *
-   * @since 2.0.0
-   */
-  @Override
-  public void stopWaitForCardRemoval() {
-    loopWaitCardRemoval.set(false);
-  }
-
-  /**
-   * {@inheritDoc}
-   *
    * <p>The default value is {@link SharingMode#EXCLUSIVE}.
    *
    * @since 2.0.0
@@ -441,10 +322,10 @@ final class PcscReaderAdapter
     logger.info("Reader [{}]: set sharing mode to [{}]", getName(), sharingMode.name());
     if (sharingMode == SharingMode.SHARED) {
       // if a card is present, change the mode immediately
-      if (card != null) {
+      if (connection != null) {
         try {
-          card.endExclusive();
-        } catch (CardException e) {
+          connection.endTransaction(_IPCSC.SCARD_LEAVE_CARD);
+        } catch (PCSCException e) {
           throw new IllegalStateException("Couldn't disable exclusive mode", e);
         }
       }
@@ -504,21 +385,22 @@ final class PcscReaderAdapter
    */
   @Override
   public byte[] transmitControlCommand(int commandId, byte[] command) {
-    Assert.getInstance().notNull(command, "command");
-    byte[] response;
-    int controlCode = isWindows ? 0x00310000 | (commandId << 2) : 0x42000000 | commandId;
-    try {
-      if (card != null) {
-        response = card.transmitControlCommand(controlCode, command);
-      } else {
-        Card virtualCard = terminal.connect("DIRECT");
-        response = virtualCard.transmitControlCommand(controlCode, command);
-        virtualCard.disconnect(false);
-      }
-    } catch (CardException e) {
-      throw new IllegalStateException("Reader failure.", e);
-    }
-    return response;
+    //    Assert.getInstance().notNull(command, "command");
+    //    byte[] response;
+    //    int controlCode = isWindows ? 0x00310000 | (commandId << 2) : 0x42000000 | commandId;
+    //    try {
+    //      if (card != null) {
+    //        response = card.transmitControlCommand(controlCode, command);
+    //      } else {
+    //        Card virtualCard = pcscCardReader.connect("DIRECT");
+    //        response = virtualCard.transmitControlCommand(controlCode, command);
+    //        virtualCard.disconnect(false);
+    //      }
+    //    } catch (CardException e) {
+    //      throw new IllegalStateException("Reader failure.", e);
+    //    }
+    //    return response;
+    return new byte[0];
   }
 
   /**
@@ -529,5 +411,35 @@ final class PcscReaderAdapter
   @Override
   public int getIoctlCcidEscapeCommandId() {
     return isWindows ? 3500 : 1;
+  }
+
+  @Override
+  public void onException(IPCSCCardReader reader, PCSCException e) {}
+
+  @Override
+  public void onStatusChange(IPCSCCardReader reader, PCSCCardReaderState cardReaderState) {
+    if (isMonitoringActive) {
+      if (cardReaderState.isPresent()) {
+        try {
+          atr = HexUtil.toHex(pcscCardReader.getState().getATR());
+        } catch (PCSCException e) {
+          // TODO
+          throw new RuntimeException(e);
+        }
+        cardInsertionCallback.onCardInserted();
+      } else if (cardReaderState.isEmpty()) {
+        cardRemoveCallback.onCardRemoved();
+      }
+    }
+  }
+
+  @Override
+  public void setCallback(CardInsertionWaiterAsynchronousApi callback) {
+    this.cardInsertionCallback = callback;
+  }
+
+  @Override
+  public void setCallback(CardRemovalWaiterAsynchronousApi callback) {
+    this.cardRemoveCallback = callback;
   }
 }

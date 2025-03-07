@@ -14,6 +14,7 @@ package org.eclipse.keyple.plugin.pcsc;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.regex.Pattern;
 import javax.smartcardio.*;
+import jnasmartcardio.Smartcardio;
 import org.eclipse.keyple.core.plugin.CardIOException;
 import org.eclipse.keyple.core.plugin.ReaderIOException;
 import org.eclipse.keyple.core.plugin.TaskCanceledException;
@@ -47,6 +48,7 @@ final class PcscReaderAdapter
   private final PcscPluginAdapter pluginAdapter;
   private final boolean isWindows;
   private final int cardMonitoringCycleDuration;
+  private final byte[] pingApdu = HexUtil.toByteArray("00C0000000"); // GET RESPONSE
   private Card card;
   private CardChannel channel;
   private Boolean isContactless;
@@ -56,6 +58,7 @@ final class PcscReaderAdapter
   private final AtomicBoolean loopWaitCard = new AtomicBoolean();
 
   private final AtomicBoolean loopWaitCardRemoval = new AtomicBoolean();
+  private boolean isObservationActive;
 
   /**
    * Constructor.
@@ -185,7 +188,7 @@ final class PcscReaderAdapter
    */
   @Override
   public void onStartDetection() {
-    /* Nothing to do here in this reader */
+    isObservationActive = true;
   }
 
   /**
@@ -195,7 +198,7 @@ final class PcscReaderAdapter
    */
   @Override
   public void onStopDetection() {
-    /* Nothing to do here in this reader */
+    isObservationActive = false;
   }
 
   /**
@@ -248,14 +251,83 @@ final class PcscReaderAdapter
    */
   @Override
   public void closePhysicalChannel() throws ReaderIOException {
+    // If the reader is observed, the actual disconnection will be done in the card removal sequence
+    if (!isObservationActive) {
+      disconnect();
+    }
+  }
+
+  /**
+   * Disconnects the current card and resets the context and reader state.
+   *
+   * <p>This method handles the disconnection of a card, taking into account the specific
+   * disconnection mode. If the card is an instance of {@link Smartcardio.JnaCard}, it disconnects
+   * using the extended mode specified by {@link #getDisposition(DisconnectionMode)} and resets the
+   * reader state to avoid incorrect card detection in subsequent operations. For other card types,
+   * it disconnects using the specified disconnection mode directly.
+   *
+   * <p>If a {@link CardException} occurs during the operation, a {@link ReaderIOException} is
+   * thrown with the associated error message.
+   *
+   * <p>Once the disconnection is handled, the method ensures that the context is reset.
+   *
+   * @throws ReaderIOException If an error occurs while closing the physical channel.
+   */
+  private void disconnect() throws ReaderIOException {
     try {
       if (card != null) {
-        card.disconnect(disconnectionMode == DisconnectionMode.RESET);
+        if (card instanceof Smartcardio.JnaCard) {
+          // disconnect using the extended mode allowing UNPOWER
+          ((Smartcardio.JnaCard) card).disconnect(getDisposition(disconnectionMode));
+          // reset the reader state to avoid bad card detection next time
+          resetReaderState();
+        } else {
+          card.disconnect(disconnectionMode == DisconnectionMode.RESET);
+        }
       }
     } catch (CardException e) {
       throw new ReaderIOException("Error while closing physical channel", e);
     } finally {
       resetContext();
+    }
+  }
+
+  /**
+   * Maps a DisconnectionMode to the corresponding SCARD_* constant.
+   *
+   * @param mode The disconnection mode.
+   * @return The corresponding SCARD_* value.
+   */
+  private static int getDisposition(DisconnectionMode mode) {
+    switch (mode) {
+      case RESET:
+        return Smartcardio.JnaCard.SCARD_RESET_CARD;
+      case LEAVE:
+        return Smartcardio.JnaCard.SCARD_LEAVE_CARD;
+      case UNPOWER:
+        return Smartcardio.JnaCard.SCARD_UNPOWER_CARD;
+      case EJECT:
+        return Smartcardio.JnaCard.SCARD_EJECT_CARD;
+      default:
+        throw new IllegalArgumentException("Unknown DisconnectionMode: " + mode);
+    }
+  }
+
+  /**
+   * Resets the state of the card reader.
+   *
+   * <p>This method attempts to reset the reader state based on the current disconnection mode. If
+   * the disconnection mode is set to UNPOWER, it reconnects to the terminal and then disconnects
+   * without powering off the reader. If any {@link CardException} occurs during this process, it is
+   * handled silently.
+   */
+  private void resetReaderState() {
+    try {
+      if (disconnectionMode == DisconnectionMode.UNPOWER) {
+        terminal.connect("*").disconnect(false);
+      }
+    } catch (CardException e) {
+      // NOP
     }
   }
 
@@ -399,40 +471,67 @@ final class PcscReaderAdapter
    */
   @Override
   public void waitForCardRemoval() throws ReaderIOException, TaskCanceledException {
-
     if (logger.isTraceEnabled()) {
-      logger.trace(
-          "Reader [{}]: start waiting card removal (loop latency: {} ms)",
-          name,
-          cardMonitoringCycleDuration);
+      logger.trace("Reader [{}]: start waiting card removal)", name);
     }
-
-    // activate loop
     loopWaitCardRemoval.set(true);
+    try {
+      if (disconnectionMode == DisconnectionMode.UNPOWER) {
+        waitForCardRemovalByPolling();
+      } else {
+        waitForCardRemovalStandard();
+      }
+    } finally {
+      try {
+        disconnect();
+      } catch (Exception e) {
+        logger.warn("Error while disconnecting card during card removal: {}", e.getMessage());
+      }
+    }
+    if (logger.isTraceEnabled()) {
+      if (!loopWaitCardRemoval.get()) {
+        logger.trace("Reader [{}]: waiting card removal stopped", name);
+      } else {
+        logger.trace("Reader [{}]: card removed", name);
+      }
+    }
+    if (!loopWaitCardRemoval.get()) {
+      throw new TaskCanceledException(
+          name + ": the wait for the card removal task has been cancelled.");
+    }
+  }
 
+  private void waitForCardRemovalByPolling() throws ReaderIOException {
+    try {
+      while (loopWaitCardRemoval.get()) {
+        transmitApdu(pingApdu);
+        Thread.sleep(25);
+        if (Thread.interrupted()) {
+          return;
+        }
+      }
+    } catch (CardIOException | ReaderIOException e) {
+      logger.trace("Expected IOException while waiting for card removal: {}", e.getMessage());
+    } catch (InterruptedException e) {
+      logger.trace("InterruptedException while waiting for card removal: {}", e.getMessage());
+      Thread.currentThread().interrupt();
+    }
+  }
+
+  private void waitForCardRemovalStandard() throws ReaderIOException {
     try {
       while (loopWaitCardRemoval.get()) {
         if (terminal.waitForCardAbsent(cardMonitoringCycleDuration)) {
-          // card removed
-          if (logger.isTraceEnabled()) {
-            logger.trace("Reader [{}]: card removed", name);
-          }
           return;
         }
         if (Thread.interrupted()) {
-          break;
+          return;
         }
       }
-      if (logger.isTraceEnabled()) {
-        logger.trace("Reader [{}]: waiting card removal stopped", name);
-      }
     } catch (CardException e) {
-      // here, it is a communication failure with the reader
       throw new ReaderIOException(
           name + ": an error occurred while waiting for the card removal.", e);
     }
-    throw new TaskCanceledException(
-        name + ": the wait for the card removal task has been cancelled.");
   }
 
   /**

@@ -5,6 +5,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+### Added
+- Introduced new enum `PcscCardCommunicationProtocol` that unifies contact and contactless protocol handling:
+  - `ISO_14443_4`: For all ISO 14443-4 compliant cards (Type A and Type B)
+  - `INNOVATRON_B_PRIME`: For Calypso devices using B Prime protocol
+  - `MIFARE_ULTRALIGHT`: For NXP MIFARE Ultralight and UltralightC technologies
+  - `ST25_SRT512`: For STMicroelectronics ST25 memory tags
+  - `ISO_7816_3`: For contact cards using ISO 7816-3 protocol
+- Implemented precise ATR pattern rules aligned with PC/SC Part 3 standards
+- Added comprehensive documentation with references to PC/SC specifications
+- Enhanced `PcscReader.DisconnectionMode` enum with additional modes:
+  - `UNPOWER`: Powers off the card completely (corresponds to PC/SC `SCARD_UNPOWER_CARD`)
+  - `EJECT`: Ejects the card if supported by the reader (corresponds to PC/SC `SCARD_EJECT_CARD`)
+### Deprecated
+- Marked `PcscSupportedContactlessProtocol` as deprecated, to be replaced by `PcscCardCommunicationProtocol`
+- Marked `PcscSupportedContactProtocol` as deprecated, to be replaced by `PcscCardCommunicationProtocol`
+### Changed
+- Updated security provider from `jnasmartcardio` to `jnasmartcardio/cna` version `0.3.0`
 
 ## [2.4.2] - 2025-01-27
 ### Fixed

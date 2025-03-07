@@ -111,17 +111,46 @@ public interface PcscReader extends KeypleReaderExtension {
    */
   enum DisconnectionMode {
     /**
-     * Resets the card
+     * Resets the card. This sends a reset signal to the card while keeping the connection alive.
+     *
+     * <p>Corresponds to PC/SC `SCARD_RESET_CARD`.
      *
      * @since 2.0.0
      */
     RESET,
+
     /**
-     * Keeps the status of the card unchanged
+     * Leaves the card in its current state without performing any reset or power down.
+     *
+     * <p>Corresponds to PC/SC `SCARD_LEAVE_CARD`.
      *
      * @since 2.0.0
      */
-    LEAVE
+    LEAVE,
+
+    /**
+     * Completely powers off the card.
+     *
+     * <p>Corresponds to PC/SC `SCARD_UNPOWER_CARD`.
+     *
+     * <p>This mode is only available with the default security provider (jnasmartcardio/cna).
+     * Depending on the provider used, a runtime error may occur during reader enumeration.
+     *
+     * @since 2.5.0
+     */
+    UNPOWER,
+
+    /**
+     * Ejects the card (if supported by the reader).
+     *
+     * <p>Corresponds to PC/SC `SCARD_EJECT_CARD`.
+     *
+     * <p>This mode is only available with the default security provider (jnasmartcardio/cna).
+     * Depending on the provider used, a runtime error may occur during reader enumeration.
+     *
+     * @since 2.5.0
+     */
+    EJECT
   }
 
   /**

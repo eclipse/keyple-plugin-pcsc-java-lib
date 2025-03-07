@@ -26,7 +26,10 @@ package org.eclipse.keyple.plugin.pcsc;
  * See <a href="https://pcscworkgroup.com/">PC/SC Workgroup</a>
  *
  * @since 2.0.0
+ * @deprecated This enum is deprecated and may be removed in future versions. Use {@link
+ *     PcscCardCommunicationProtocol} instead.
  */
+@Deprecated
 public enum PcscSupportedContactlessProtocol {
 
   /**

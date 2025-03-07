@@ -29,8 +29,7 @@ import org.eclipse.keyple.core.util.Assert;
  * PcscReader#setContactless(boolean)}. <br>
  * A set of default protocol identification rules is also proposed.
  *
- * @see PcscSupportedContactProtocol
- * @see PcscSupportedContactlessProtocol
+ * @see PcscCardCommunicationProtocol
  * @since 2.0.0
  */
 public final class PcscPluginFactoryBuilder {

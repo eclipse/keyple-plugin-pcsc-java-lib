@@ -17,7 +17,10 @@ package org.eclipse.keyple.plugin.pcsc;
  * <p>TODO Improve protocol identification
  *
  * @since 2.0.0
+ * @deprecated This enum is deprecated and may be removed in future versions. Use {@link
+ *     PcscCardCommunicationProtocol} instead.
  */
+@Deprecated
 public enum PcscSupportedContactProtocol {
 
   /**

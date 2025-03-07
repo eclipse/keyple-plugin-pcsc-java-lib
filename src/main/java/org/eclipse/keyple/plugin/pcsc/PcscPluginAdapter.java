@@ -53,28 +53,24 @@ final class PcscPluginAdapter implements PcscPlugin, ObservablePluginSpi {
   static {
     // contactless protocols
     protocolRulesMap.put(
-        PcscSupportedContactlessProtocol.ISO_14443_4.name(),
-        PcscSupportedContactlessProtocol.ISO_14443_4.getDefaultRule());
+        PcscCardCommunicationProtocol.ISO_14443_4.name(),
+        PcscCardCommunicationProtocol.ISO_14443_4.getDefaultRule());
     protocolRulesMap.put(
-        PcscSupportedContactlessProtocol.INNOVATRON_B_PRIME_CARD.name(),
-        PcscSupportedContactlessProtocol.INNOVATRON_B_PRIME_CARD.getDefaultRule());
+        PcscCardCommunicationProtocol.INNOVATRON_B_PRIME.name(),
+        PcscCardCommunicationProtocol.INNOVATRON_B_PRIME.getDefaultRule());
     protocolRulesMap.put(
-        PcscSupportedContactlessProtocol.MIFARE_ULTRA_LIGHT.name(),
-        PcscSupportedContactlessProtocol.MIFARE_ULTRA_LIGHT.getDefaultRule());
+        PcscCardCommunicationProtocol.MIFARE_ULTRALIGHT.name(),
+        PcscCardCommunicationProtocol.MIFARE_ULTRALIGHT.getDefaultRule());
     protocolRulesMap.put(
-        PcscSupportedContactlessProtocol.MIFARE_CLASSIC.name(),
-        PcscSupportedContactlessProtocol.MIFARE_CLASSIC.getDefaultRule());
-    protocolRulesMap.put(
-        PcscSupportedContactlessProtocol.MIFARE_DESFIRE.name(),
-        PcscSupportedContactlessProtocol.MIFARE_DESFIRE.getDefaultRule());
-    protocolRulesMap.put(
-        PcscSupportedContactlessProtocol.MEMORY_ST25.name(),
-        PcscSupportedContactlessProtocol.MEMORY_ST25.getDefaultRule());
+        PcscCardCommunicationProtocol.ST25_SRT512.name(),
+        PcscCardCommunicationProtocol.ST25_SRT512.getDefaultRule());
 
     // contacts protocols
     protocolRulesMap.put(
-        PcscSupportedContactProtocol.ISO_7816_3.name(),
-        PcscSupportedContactProtocol.ISO_7816_3.getDefaultRule());
+        PcscCardCommunicationProtocol.ISO_7816_3.name(),
+        PcscCardCommunicationProtocol.ISO_7816_3.getDefaultRule());
+
+    // legacy protocols for compatibility
     protocolRulesMap.put(
         PcscSupportedContactProtocol.ISO_7816_3_T0.name(),
         PcscSupportedContactProtocol.ISO_7816_3_T0.getDefaultRule());
